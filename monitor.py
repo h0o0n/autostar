@@ -59,21 +59,31 @@ class StockMonitor:
         
         # 리스크 파라미터 계산
         indicators = stock_data.get('indicators', {})
+        btc_trend = stock_data.get('btc_trend_direction')  # 비트코인 추세 정보
+        # stock_data에서 전체 비트코인 추세 정보 가져오기 (있는 경우)
+        btc_trend_full = stock_data.get('btc_trend_info')
+        
         risk_params = self.risk_manager.calculate_all_risk_parameters(
             current_price,
-            indicators
+            indicators,
+            btc_trend=btc_trend_full
         )
         
         # 모니터링 데이터 구성
+        take_profit_levels = risk_params.get('take_profit_levels', [])
+        first_take_profit = take_profit_levels[0]['profit_price'] if take_profit_levels else risk_params.get('first_take_profit_price', current_price * 1.05)
+        
         monitor_data = {
             'ticker': ticker,
             'entry_price': risk_params['entry_price'],
             'stop_loss_price': risk_params['stop_loss_price'],
-            'take_profit_price': risk_params['take_profit_price'],
+            'take_profit_levels': take_profit_levels,  # 분할 익절 레벨
+            'first_take_profit_price': first_take_profit,  # 첫 번째 익절가 (호환성)
             'current_price': current_price,
             'last_price': current_price,
             'price_change_percent': 0.0,
             'status': '대기중',  # 대기중, 진입, 손절, 익절
+            'exited_levels': [],  # 이미 익절한 레벨 리스트
             'added_at': datetime.now(),
             'last_update': datetime.now(),
             'risk_params': risk_params,
@@ -145,6 +155,7 @@ class StockMonitor:
     def _update_status(self, stock: Dict):
         """
         종목의 상태를 업데이트합니다.
+        분할 익절 전략을 적용합니다.
         
         Args:
             stock: 종목 정보 딕셔너리
@@ -152,19 +163,44 @@ class StockMonitor:
         current_price = stock['current_price']
         entry_price = stock['entry_price']
         stop_loss = stock['stop_loss_price']
-        take_profit = stock['take_profit_price']
+        take_profit_levels = stock.get('take_profit_levels', [])
+        exited_levels = stock.get('exited_levels', [])
         
         # 손절가 도달
         if current_price <= stop_loss:
             if stock['status'] != '손절':
                 stock['status'] = '손절'
                 self._print_alert(stock, "손절가 도달!")
+            return
         
-        # 익절가 도달
-        elif current_price >= take_profit:
-            if stock['status'] != '익절':
-                stock['status'] = '익절'
-                self._print_alert(stock, "익절가 도달!")
+        # 분할 익절 레벨 확인
+        for level in take_profit_levels:
+            level_num = level['level']
+            profit_price = level['profit_price']
+            
+            # 이미 익절한 레벨은 건너뛰기
+            if level_num in exited_levels:
+                continue
+            
+            # 익절 레벨 도달 확인
+            if current_price >= profit_price:
+                # 익절 레벨 추가
+                exited_levels.append(level_num)
+                stock['exited_levels'] = exited_levels
+                
+                # 익절 알림
+                profit_percent = level['profit_percent']
+                ratio = level['ratio']
+                self._print_alert(
+                    stock, 
+                    f"익절 레벨 {level_num} 도달! ({profit_percent:.2f}%, {ratio*100:.1f}% 익절)"
+                )
+        
+        # 모든 레벨 익절 완료
+        if len(exited_levels) == len(take_profit_levels) and len(take_profit_levels) > 0:
+            if stock['status'] != '완전익절':
+                stock['status'] = '완전익절'
+                self._print_alert(stock, "모든 익절 레벨 완료!")
         
         # 진입가 도달
         elif current_price <= entry_price * 1.01:  # 진입가의 1% 이내
@@ -203,20 +239,22 @@ class StockMonitor:
         print(f"모니터링 종목 현황 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
         print(f"{'='*100}{Style.RESET_ALL}\n")
         
-        print(f"{'종목':<15} {'현재가':>12} {'진입가':>12} {'손절가':>12} {'익절가':>12} {'변동률':>8} {'상태':>8}")
-        print("-" * 100)
+        print(f"{'종목':<15} {'현재가':>12} {'진입가':>12} {'손절가':>12} {'첫익절가':>12} {'변동률':>8} {'상태':>12} {'익절레벨':>10}")
+        print("-" * 110)
         
         for stock in self.monitored_stocks:
             ticker = stock['ticker']
             current_price = stock['current_price']
             entry_price = stock['entry_price']
             stop_loss = stock['stop_loss_price']
-            take_profit = stock['take_profit_price']
+            first_take_profit = stock.get('first_take_profit_price', stock.get('take_profit_price', current_price * 1.05))
             change = stock['price_change_percent']
             status = stock['status']
+            exited_levels = stock.get('exited_levels', [])
+            total_levels = len(stock.get('take_profit_levels', []))
             
             # 색상 설정
-            if status == '익절':
+            if status == '완전익절' or status == '익절':
                 color = Fore.GREEN
             elif status == '손절':
                 color = Fore.RED
@@ -233,7 +271,13 @@ class StockMonitor:
             else:
                 change_color = Fore.WHITE
             
-            print(f"{color}{ticker:<15} {current_price:>12,.0f} {entry_price:>12,.0f} {stop_loss:>12,.0f} {take_profit:>12,.0f} {change_color}{change_str:>8}{Style.RESET_ALL} {color}{status:>8}{Style.RESET_ALL}")
+            # 익절 레벨 표시
+            if exited_levels:
+                levels_str = f"{len(exited_levels)}/{total_levels}"
+            else:
+                levels_str = f"0/{total_levels}" if total_levels > 0 else "-"
+            
+            print(f"{color}{ticker:<15} {current_price:>12,.0f} {entry_price:>12,.0f} {stop_loss:>12,.0f} {first_take_profit:>12,.0f} {change_color}{change_str:>8}{Style.RESET_ALL} {color}{status:>12}{Style.RESET_ALL} {levels_str:>10}")
         
         print(f"\n{Fore.CYAN}{'='*100}{Style.RESET_ALL}\n")
     

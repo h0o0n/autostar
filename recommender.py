@@ -4,6 +4,7 @@
 """
 import config
 from typing import List, Dict, Optional
+from colorama import Fore, Style
 from upbit_client import UpbitClient
 from indicators import TechnicalIndicators
 from trend_analyzer import TrendAnalyzer
@@ -237,26 +238,52 @@ class StockRecommender:
             surge_analysis = self.surge_analyzer.analyze_short_term_surge_potential(ticker)
             surge_score = surge_analysis.get('total_score', 0.5)
         
+        # 비트코인 추세에 따른 필터링 및 가중치 조정
+        btc_trend_direction = btc_trend.get('trend_direction', '불명확')
+        btc_trend_strength = btc_trend.get('trend_strength', 0.5)
+        btc_is_uptrend = btc_trend.get('is_uptrend', False)
+        btc_is_downtrend = btc_trend.get('is_downtrend', False)
+        
+        # 비트코인 하락 추세일 때는 점수 크게 감소
+        btc_trend_multiplier = 1.0
+        if btc_is_downtrend:
+            # 하락 추세일 때는 점수를 0.3~0.5배로 감소
+            btc_trend_multiplier = max(0.3, 1.0 - btc_trend_strength * 0.7)
+        elif btc_is_uptrend:
+            # 상승 추세일 때는 점수를 1.0~1.2배로 증가
+            btc_trend_multiplier = min(1.2, 1.0 + btc_trend_strength * 0.2)
+        else:
+            # 횡보일 때는 약간 감소
+            btc_trend_multiplier = 0.8
+        
+        # 거래량과 추세를 더 강조 (거래량 점수 2배 가중)
+        enhanced_volume_score = min(1.0, volume_score * 1.5)  # 거래량 점수 강화
+        
         # 가중 평균으로 총점 계산
-        total_score = (
+        base_score = (
             rsi_score * self.config['WEIGHT_RSI'] +
             macd_score * self.config['WEIGHT_MACD'] +
             bb_score * self.config['WEIGHT_BB'] +
             ma_score * self.config['WEIGHT_MA'] +
-            volume_score * self.config['WEIGHT_VOLUME'] +
+            enhanced_volume_score * self.config['WEIGHT_VOLUME'] * 2.0 +  # 거래량 2배 가중
             btc_score * self.config['WEIGHT_BTC_CORRELATION'] +
             whale_score * self.config['WEIGHT_WHALE'] +
             surge_score * self.config['WEIGHT_SURGE']
         )
         
+        # 비트코인 추세에 따른 최종 점수 조정
+        total_score = base_score * btc_trend_multiplier
+        
         return {
             'ticker': ticker,
             'total_score': total_score,
+            'base_score': base_score,  # 조정 전 점수
+            'btc_trend_multiplier': btc_trend_multiplier,  # 비트코인 추세 배수
             'rsi_score': rsi_score,
             'macd_score': macd_score,
             'bb_score': bb_score,
             'ma_score': ma_score,
-            'volume_score': volume_score,
+            'volume_score': enhanced_volume_score,  # 강화된 거래량 점수
             'btc_score': btc_score,
             'whale_score': whale_score,
             'surge_score': surge_score,
@@ -264,7 +291,8 @@ class StockRecommender:
             'surge_analysis': surge_analysis,
             'indicators': indicators,
             'correlation': correlation,
-            'relative_strength': relative_strength
+            'relative_strength': relative_strength,
+            'btc_trend_direction': btc_trend_direction
         }
     
     def recommend_stocks(self, top_n: int = 10) -> List[Dict]:
@@ -283,7 +311,19 @@ class StockRecommender:
             print("비트코인 추세 분석 실패")
             return []
         
-        print(f"비트코인 추세: {btc_trend['trend_direction']} (강도: {btc_trend['trend_strength']:.2f})")
+        trend_direction = btc_trend['trend_direction']
+        trend_strength = btc_trend['trend_strength']
+        trend_signal = btc_trend.get('trend_signal', '불명확')
+        is_uptrend = btc_trend.get('is_uptrend', False)
+        is_downtrend = btc_trend.get('is_downtrend', False)
+        
+        print(f"비트코인 추세: {trend_signal} (방향: {trend_direction}, 강도: {trend_strength:.2f})")
+        
+        # 비트코인 하락 추세일 때 경고
+        if is_downtrend:
+            print(f"{Fore.RED}⚠️  경고: 비트코인이 하락 추세입니다. 알트코인 추천이 제한됩니다.{Style.RESET_ALL}")
+        elif is_uptrend:
+            print(f"{Fore.GREEN}✓ 비트코인이 상승 추세입니다. 알트코인 추천에 유리합니다.{Style.RESET_ALL}")
         
         # KRW 마켓 티커 가져오기
         print("거래 가능한 종목 조회 중...")
@@ -320,11 +360,26 @@ class StockRecommender:
                 current_price = self.client.get_current_price(ticker)
                 if current_price:
                     score_data['current_price'] = current_price
+                    score_data['btc_trend_info'] = btc_trend  # 비트코인 추세 정보 포함
                     recommendations.append(score_data)
                 
             except Exception as e:
                 print(f"{ticker} 분석 중 오류 발생: {e}")
                 continue
+        
+        # 비트코인 추세에 따른 필터링
+        btc_is_downtrend = btc_trend.get('is_downtrend', False)
+        btc_is_uptrend = btc_trend.get('is_uptrend', False)
+        
+        # 비트코인 하락 추세일 때는 점수가 높은 종목만 필터링
+        if btc_is_downtrend:
+            # 하락 추세일 때는 최소 점수 기준 적용
+            min_score_threshold = 0.5
+            recommendations = [r for r in recommendations if r['total_score'] >= min_score_threshold]
+            print(f"{Fore.YELLOW}비트코인 하락 추세로 인해 {len(recommendations)}개 종목만 추천됩니다.{Style.RESET_ALL}")
+        elif btc_is_uptrend:
+            # 상승 추세일 때는 더 많은 종목 추천 가능
+            print(f"{Fore.GREEN}비트코인 상승 추세로 인해 알트코인 추천에 유리합니다.{Style.RESET_ALL}")
         
         # 점수 순으로 정렬
         recommendations.sort(key=lambda x: x['total_score'], reverse=True)

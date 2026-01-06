@@ -38,25 +38,51 @@ class TrendAnalyzer:
             ma20 = btc_df['close'].rolling(window=20).mean().iloc[-1]
             current_price = btc_df['close'].iloc[-1]
             
-            # 추세 방향 판단
-            if ma5 > ma20:
+            # 추세 방향 판단 (더 정확한 분석)
+            ma60 = btc_df['close'].rolling(window=60).mean().iloc[-1] if len(btc_df) >= 60 else ma20
+            
+            # 다중 이동평균선으로 추세 판단
+            is_uptrend = (ma5 > ma20 > ma60) and (current_price > ma5)
+            is_downtrend = (ma5 < ma20 < ma60) and (current_price < ma5)
+            
+            if is_uptrend:
                 trend_direction = "상승"
-                trend_strength = min((ma5 - ma20) / ma20 * 100, 10) / 10  # 0-1 정규화
-            else:
+                # 상승 추세 강도 계산
+                trend_strength = min((ma5 - ma20) / ma20 * 100, 15) / 15  # 0-1 정규화
+            elif is_downtrend:
                 trend_direction = "하락"
-                trend_strength = min((ma20 - ma5) / ma20 * 100, 10) / 10
+                # 하락 추세 강도 계산
+                trend_strength = min((ma20 - ma5) / ma20 * 100, 15) / 15
+            else:
+                # 횡보 또는 불명확
+                if ma5 > ma20:
+                    trend_direction = "상승"
+                    trend_strength = min((ma5 - ma20) / ma20 * 100, 10) / 10 * 0.5  # 약한 상승
+                else:
+                    trend_direction = "하락"
+                    trend_strength = min((ma20 - ma5) / ma20 * 100, 10) / 10 * 0.5  # 약한 하락
             
             # 가격 변화율 (1일, 7일, 30일)
             price_change_1d = (current_price - btc_df['close'].iloc[-2]) / btc_df['close'].iloc[-2] * 100 if len(btc_df) >= 2 else 0
             price_change_7d = (current_price - btc_df['close'].iloc[-8]) / btc_df['close'].iloc[-8] * 100 if len(btc_df) >= 8 else 0
             price_change_30d = (current_price - btc_df['close'].iloc[-31]) / btc_df['close'].iloc[-31] * 100 if len(btc_df) >= 31 else 0
             
+            # 추세 신호 강도 (상승/하락 명확도)
+            trend_signal = "강한_상승" if (is_uptrend and trend_strength > 0.7) else \
+                          "상승" if (trend_direction == "상승") else \
+                          "강한_하락" if (is_downtrend and trend_strength > 0.7) else \
+                          "하락"
+            
             return {
                 'current_price': current_price,
                 'ma5': ma5,
                 'ma20': ma20,
+                'ma60': ma60 if len(btc_df) >= 60 else None,
                 'trend_direction': trend_direction,
                 'trend_strength': trend_strength,  # 0-1 값
+                'trend_signal': trend_signal,  # 추세 신호 강도
+                'is_uptrend': is_uptrend,
+                'is_downtrend': is_downtrend,
                 'price_change_1d': price_change_1d,
                 'price_change_7d': price_change_7d,
                 'price_change_30d': price_change_30d
