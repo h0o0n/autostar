@@ -1,0 +1,205 @@
+"""
+리스크 관리 모듈
+진입가와 손절가를 계산하고 리스크를 관리합니다.
+"""
+import config
+from typing import Dict, Optional
+
+class RiskManager:
+    """리스크를 관리하는 클래스"""
+    
+    def __init__(self):
+        """초기화"""
+        self.stop_loss_percent = config.STOP_LOSS_PERCENT
+        self.take_profit_percent = config.TAKE_PROFIT_PERCENT
+        self.max_position_size = config.MAX_POSITION_SIZE
+    
+    def calculate_entry_price(self, current_price: float, indicators: Dict) -> Dict:
+        """
+        진입가를 계산합니다.
+        기술적 지표를 기반으로 최적의 진입가를 제안합니다.
+        
+        Args:
+            current_price: 현재가
+            indicators: 기술적 지표 딕셔너리
+            
+        Returns:
+            진입가 정보 딕셔너리
+        """
+        # 기본 진입가 (현재가)
+        entry_price = current_price
+        
+        # 볼린저 밴드 하단 근처면 조금 더 낮은 가격 제안
+        bb_data = indicators.get('bollinger')
+        if bb_data:
+            bb_lower = bb_data.get('lower')
+            bb_position = bb_data.get('position', 0.5)
+            
+            # 하단 밴드 근처면 하단 밴드 가격을 진입가로 제안
+            if bb_position < 0.3 and bb_lower:
+                entry_price = min(entry_price, bb_lower * 1.01)  # 하단 밴드보다 1% 위
+        
+        # 이동평균선 근처면 이동평균선 가격 제안
+        ma_data = indicators.get('moving_averages')
+        if ma_data:
+            ma_short = ma_data.get('ma_short')
+            ma_medium = ma_data.get('ma_medium')
+            
+            if ma_short and current_price > ma_short:
+                # 현재가가 단기 이동평균선 위면, 단기 이동평균선 근처 진입 제안
+                entry_price = min(entry_price, ma_short * 1.02)
+            elif ma_medium and current_price > ma_medium:
+                entry_price = min(entry_price, ma_medium * 1.02)
+        
+        return {
+            'suggested_entry': entry_price,
+            'current_price': current_price,
+            'entry_premium': ((current_price - entry_price) / current_price * 100) if current_price > 0 else 0
+        }
+    
+    def calculate_stop_loss(self, entry_price: float, current_price: float, indicators: Dict) -> Dict:
+        """
+        손절가를 계산합니다.
+        
+        Args:
+            entry_price: 진입가
+            current_price: 현재가
+            indicators: 기술적 지표 딕셔너리
+            
+        Returns:
+            손절가 정보 딕셔너리
+        """
+        # 기본 손절가 (진입가의 손절 비율만큼 하락)
+        base_stop_loss = entry_price * (1 - self.stop_loss_percent / 100)
+        
+        # 볼린저 밴드 하단을 고려
+        stop_loss = base_stop_loss
+        bb_data = indicators.get('bollinger')
+        if bb_data:
+            bb_lower = bb_data.get('lower')
+            if bb_lower and bb_lower < base_stop_loss:
+                # 볼린저 밴드 하단이 더 낮으면, 그 아래로 손절가 설정
+                stop_loss = bb_lower * 0.98
+        
+        # 이동평균선을 고려
+        ma_data = indicators.get('moving_averages')
+        if ma_data:
+            ma_long = ma_data.get('ma_long')
+            if ma_long and ma_long < stop_loss:
+                # 장기 이동평균선이 손절가보다 낮으면, 그 아래로 설정
+                stop_loss = ma_long * 0.97
+        
+        # 손절가가 진입가보다 높으면 안됨
+        stop_loss = min(stop_loss, entry_price * 0.99)
+        
+        return {
+            'stop_loss_price': stop_loss,
+            'stop_loss_percent': ((entry_price - stop_loss) / entry_price * 100) if entry_price > 0 else 0,
+            'risk_amount_per_unit': entry_price - stop_loss
+        }
+    
+    def calculate_take_profit(self, entry_price: float) -> Dict:
+        """
+        익절가를 계산합니다.
+        
+        Args:
+            entry_price: 진입가
+            
+        Returns:
+            익절가 정보 딕셔너리
+        """
+        take_profit = entry_price * (1 + self.take_profit_percent / 100)
+        
+        return {
+            'take_profit_price': take_profit,
+            'take_profit_percent': self.take_profit_percent,
+            'profit_amount_per_unit': take_profit - entry_price
+        }
+    
+    def calculate_position_size(self, entry_price: float, stop_loss_price: float, total_capital: float) -> Dict:
+        """
+        포지션 크기를 계산합니다.
+        
+        Args:
+            entry_price: 진입가
+            stop_loss_price: 손절가
+            total_capital: 총 자본금
+            
+        Returns:
+            포지션 크기 정보 딕셔너리
+        """
+        # 리스크 금액 (진입가와 손절가의 차이)
+        risk_per_unit = entry_price - stop_loss_price
+        if risk_per_unit <= 0:
+            return {
+                'position_size': 0,
+                'position_value': 0,
+                'max_risk_amount': 0
+            }
+        
+        # 최대 리스크 금액 (총 자본의 2%)
+        max_risk = total_capital * 0.02
+        
+        # 포지션 크기 계산 (최대 리스크 금액 / 리스크 금액)
+        position_size = max_risk / risk_per_unit
+        
+        # 최대 포지션 크기 제한
+        max_position_value = total_capital * self.max_position_size
+        max_position_size_by_capital = max_position_value / entry_price
+        
+        position_size = min(position_size, max_position_size_by_capital)
+        
+        position_value = position_size * entry_price
+        
+        return {
+            'position_size': position_size,
+            'position_value': position_value,
+            'max_risk_amount': position_size * risk_per_unit,
+            'risk_percent_of_capital': (position_size * risk_per_unit / total_capital * 100) if total_capital > 0 else 0
+        }
+    
+    def calculate_all_risk_parameters(self, current_price: float, indicators: Dict, total_capital: float = 10000000) -> Dict:
+        """
+        모든 리스크 관리 파라미터를 계산합니다.
+        
+        Args:
+            current_price: 현재가
+            indicators: 기술적 지표 딕셔너리
+            total_capital: 총 자본금 (기본값: 1천만원)
+            
+        Returns:
+            모든 리스크 파라미터를 포함한 딕셔너리
+        """
+        # 진입가 계산
+        entry_info = self.calculate_entry_price(current_price, indicators)
+        entry_price = entry_info['suggested_entry']
+        
+        # 손절가 계산
+        stop_loss_info = self.calculate_stop_loss(entry_price, current_price, indicators)
+        
+        # 익절가 계산
+        take_profit_info = self.calculate_take_profit(entry_price)
+        
+        # 포지션 크기 계산
+        position_info = self.calculate_position_size(
+            entry_price,
+            stop_loss_info['stop_loss_price'],
+            total_capital
+        )
+        
+        return {
+            'entry_price': entry_price,
+            'current_price': current_price,
+            'stop_loss_price': stop_loss_info['stop_loss_price'],
+            'take_profit_price': take_profit_info['take_profit_price'],
+            'stop_loss_percent': stop_loss_info['stop_loss_percent'],
+            'take_profit_percent': take_profit_info['take_profit_percent'],
+            'position_size': position_info['position_size'],
+            'position_value': position_info['position_value'],
+            'max_risk_amount': position_info['max_risk_amount'],
+            'risk_reward_ratio': (
+                take_profit_info['profit_amount_per_unit'] / stop_loss_info['risk_amount_per_unit']
+                if stop_loss_info['risk_amount_per_unit'] > 0 else 0
+            )
+        }
+
