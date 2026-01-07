@@ -95,13 +95,21 @@ class StockRecommender:
         
         # MACD가 시그널 위에 있고, 히스토그램이 양수면 높은 점수
         if macd > signal and histogram > 0:
-            # 히스토그램 크기에 비례하여 점수 부여
-            score = min(abs(histogram) / abs(signal) if signal != 0 else 0.5, 1.0)
-            return max(0.5, score)  # 최소 0.5
+            # 히스토그램이 양수이고 증가 추세면 높은 점수
+            # 히스토그램 크기를 정규화 (현재가 대비)
+            if abs(signal) > 0:
+                histogram_ratio = abs(histogram) / abs(signal)
+                # 0.5 ~ 2.0 범위를 0.5 ~ 1.0으로 매핑
+                score = 0.5 + min(histogram_ratio / 2.0, 0.5)
+            else:
+                score = 0.7  # 시그널이 0에 가까우면 기본 점수
+            return min(1.0, max(0.5, score))
         elif macd > signal:
-            return 0.3  # MACD가 시그널 위지만 히스토그램이 음수
+            return 0.3  # MACD가 시그널 위지만 히스토그램이 음수 (약한 상승)
+        elif macd < signal and histogram < 0:
+            return 0.0  # MACD가 시그널 아래이고 하락 추세
         else:
-            return 0.0  # MACD가 시그널 아래
+            return 0.1  # MACD가 시그널 아래지만 히스토그램이 양수 (약한 하락)
     
     def calculate_bb_score(self, bb_data: Optional[Dict]) -> float:
         """
@@ -225,18 +233,26 @@ class StockRecommender:
         btc_score = self.calculate_btc_correlation_score(correlation, relative_strength)
         
         # 고래 활동 점수
-        whale_score = 0.5  # 기본값 (중립)
+        # 데이터가 없으면 점수를 낮춤 (중립보다는 부정적)
+        whale_score = 0.3  # 기본값 (데이터 없음 = 낮은 점수)
         whale_activity = None
         if self.whale_analyzer:
-            whale_score = self.whale_analyzer.get_whale_score(ticker)
             whale_activity = self.whale_analyzer.analyze_whale_activity(ticker)
+            if whale_activity:
+                whale_score = whale_activity.get('score', 0.3)
+            else:
+                whale_score = 0.3  # 데이터 없음
         
         # 급등 가능성 점수
-        surge_score = 0.5  # 기본값 (중립)
+        # 데이터가 없으면 점수를 낮춤
+        surge_score = 0.3  # 기본값 (데이터 없음 = 낮은 점수)
         surge_analysis = None
         if self.surge_analyzer:
             surge_analysis = self.surge_analyzer.analyze_short_term_surge_potential(ticker)
-            surge_score = surge_analysis.get('total_score', 0.5)
+            if surge_analysis and surge_analysis.get('total_score') is not None:
+                surge_score = surge_analysis.get('total_score', 0.3)
+            else:
+                surge_score = 0.3  # 데이터 없음
         
         # 비트코인 추세에 따른 필터링 및 가중치 조정
         btc_trend_direction = btc_trend.get('trend_direction', '불명확')
@@ -244,32 +260,55 @@ class StockRecommender:
         btc_is_uptrend = btc_trend.get('is_uptrend', False)
         btc_is_downtrend = btc_trend.get('is_downtrend', False)
         
-        # 비트코인 하락 추세일 때는 점수 크게 감소
+        # 비트코인 추세에 따른 점수 조정
+        # 하락 추세일 때는 더 공격적으로 점수 감소
         btc_trend_multiplier = 1.0
         if btc_is_downtrend:
-            # 하락 추세일 때는 점수를 0.3~0.5배로 감소
-            btc_trend_multiplier = max(0.3, 1.0 - btc_trend_strength * 0.7)
+            # 강한 하락 추세일 때는 점수를 0.2~0.4배로 크게 감소
+            # 추세가 강할수록 더 많이 감소
+            btc_trend_multiplier = max(0.2, 1.0 - btc_trend_strength * 0.8)
         elif btc_is_uptrend:
-            # 상승 추세일 때는 점수를 1.0~1.2배로 증가
-            btc_trend_multiplier = min(1.2, 1.0 + btc_trend_strength * 0.2)
+            # 상승 추세일 때는 점수를 1.0~1.15배로 소폭 증가 (과도한 증가 방지)
+            btc_trend_multiplier = min(1.15, 1.0 + btc_trend_strength * 0.15)
         else:
             # 횡보일 때는 약간 감소
-            btc_trend_multiplier = 0.8
+            btc_trend_multiplier = 0.85
         
-        # 거래량과 추세를 더 강조 (거래량 점수 2배 가중)
-        enhanced_volume_score = min(1.0, volume_score * 1.5)  # 거래량 점수 강화
+        # 거래량 점수 강화 (더 합리적인 방식)
+        # 거래량이 평균의 2배 이상이면 추가 보너스
+        volume_bonus = 0.0
+        if volume_score >= 0.6:  # 거래량이 이미 높으면
+            volume_bonus = (volume_score - 0.6) * 0.5  # 최대 0.2 보너스
+        enhanced_volume_score = min(1.0, volume_score + volume_bonus)
         
-        # 가중 평균으로 총점 계산
+        # 가중 평균으로 총점 계산 (정규화된 가중치 사용)
+        # 거래량은 중요하지만 2배 가중은 너무 과함, 대신 가중치 자체를 높임
         base_score = (
             rsi_score * self.config['WEIGHT_RSI'] +
             macd_score * self.config['WEIGHT_MACD'] +
             bb_score * self.config['WEIGHT_BB'] +
             ma_score * self.config['WEIGHT_MA'] +
-            enhanced_volume_score * self.config['WEIGHT_VOLUME'] * 2.0 +  # 거래량 2배 가중
+            enhanced_volume_score * (self.config['WEIGHT_VOLUME'] * 1.5) +  # 거래량 1.5배 가중 (정규화)
             btc_score * self.config['WEIGHT_BTC_CORRELATION'] +
             whale_score * self.config['WEIGHT_WHALE'] +
             surge_score * self.config['WEIGHT_SURGE']
         )
+        
+        # 가중치 합계 정규화 (거래량 1.5배 반영)
+        total_weight = (
+            self.config['WEIGHT_RSI'] +
+            self.config['WEIGHT_MACD'] +
+            self.config['WEIGHT_BB'] +
+            self.config['WEIGHT_MA'] +
+            self.config['WEIGHT_VOLUME'] * 1.5 +
+            self.config['WEIGHT_BTC_CORRELATION'] +
+            self.config['WEIGHT_WHALE'] +
+            self.config['WEIGHT_SURGE']
+        )
+        
+        # 정규화 (총 가중치로 나누기)
+        if total_weight > 0:
+            base_score = base_score / total_weight
         
         # 비트코인 추세에 따른 최종 점수 조정
         total_score = base_score * btc_trend_multiplier
@@ -371,15 +410,24 @@ class StockRecommender:
         btc_is_downtrend = btc_trend.get('is_downtrend', False)
         btc_is_uptrend = btc_trend.get('is_uptrend', False)
         
-        # 비트코인 하락 추세일 때는 점수가 높은 종목만 필터링
+        # 비트코인 추세에 따른 필터링
         if btc_is_downtrend:
-            # 하락 추세일 때는 최소 점수 기준 적용
-            min_score_threshold = 0.5
+            # 하락 추세일 때는 매우 높은 최소 점수 기준 적용 (더 보수적)
+            min_score_threshold = 0.65  # 하락 추세일 때는 높은 기준
             recommendations = [r for r in recommendations if r['total_score'] >= min_score_threshold]
-            print(f"{Fore.YELLOW}비트코인 하락 추세로 인해 {len(recommendations)}개 종목만 추천됩니다.{Style.RESET_ALL}")
+            
+            if len(recommendations) == 0:
+                print(f"{Fore.RED}⚠️  비트코인 강한 하락 추세: 추천할 종목이 없습니다. 매수를 자제하세요.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}⚠️  비트코인 하락 추세: 매우 보수적으로 {len(recommendations)}개 종목만 추천됩니다.{Style.RESET_ALL}")
         elif btc_is_uptrend:
             # 상승 추세일 때는 더 많은 종목 추천 가능
-            print(f"{Fore.GREEN}비트코인 상승 추세로 인해 알트코인 추천에 유리합니다.{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}✓ 비트코인 상승 추세: 알트코인 추천에 유리한 환경입니다.{Style.RESET_ALL}")
+        else:
+            # 횡보일 때는 보통 기준
+            min_score_threshold = 0.55
+            recommendations = [r for r in recommendations if r['total_score'] >= min_score_threshold]
+            print(f"{Fore.YELLOW}비트코인 횡보: 보통 기준으로 추천합니다.{Style.RESET_ALL}")
         
         # 점수 순으로 정렬
         recommendations.sort(key=lambda x: x['total_score'], reverse=True)

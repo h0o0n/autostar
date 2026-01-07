@@ -248,9 +248,16 @@ class RiskManager:
             total_capital
         )
         
-        # 첫 번째 익절 레벨 기준으로 리스크/보상 비율 계산
-        first_profit = take_profit_info['first_take_profit_price'] - entry_price
+        # 평균 익절가 기준으로 리스크/보상 비율 계산 (분할 익절 반영)
+        avg_profit = entry_price * (take_profit_info['avg_take_profit_percent'] / 100)
         risk_reward_ratio = (
+            avg_profit / stop_loss_info['risk_amount_per_unit']
+            if stop_loss_info['risk_amount_per_unit'] > 0 else 0
+        )
+        
+        # 첫 번째 익절 레벨도 별도로 계산 (빠른 익절 기준)
+        first_profit = take_profit_info['first_take_profit_price'] - entry_price
+        first_risk_reward_ratio = (
             first_profit / stop_loss_info['risk_amount_per_unit']
             if stop_loss_info['risk_amount_per_unit'] > 0 else 0
         )
@@ -263,7 +270,8 @@ class RiskManager:
             'position_size': position_info['position_size'],
             'position_value': position_info['position_value'],
             'max_risk_amount': position_info['max_risk_amount'],
-            'risk_reward_ratio': risk_reward_ratio,
+            'risk_reward_ratio': risk_reward_ratio,  # 평균 익절 기준
+            'first_risk_reward_ratio': first_risk_reward_ratio,  # 첫 익절 기준
             # 분할 익절 정보
             'take_profit_levels': take_profit_info['take_profit_levels'],
             'first_take_profit_price': take_profit_info['first_take_profit_price'],
